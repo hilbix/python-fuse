@@ -348,7 +348,7 @@ OUT_DECREF:
 	return ret;
 }
 
-#if FUSE_VERSION >= 23
+#if true //FUSE_VERSION >= 23 
 static int
 readdir_func(const char *path, void *buf, fuse_fill_dir_t df, off_t off,
              struct fuse_file_info *fi)
@@ -929,6 +929,64 @@ pyfuse_loop_mt(struct fuse *f)
 
 static struct fuse *fuse=NULL;
 
+#if defined(FSP_FUSE_API)
+static void fuse_teardown_(struct fuse *fuse, char *mountpoint, struct fuse_chan *ch)
+{
+	fuse_remove_signal_handlers(NULL);
+	fuse_unmount(mountpoint,ch);
+	fuse_destroy(fuse);
+	free(mountpoint);
+}
+
+struct fuse *fuse_setup_(int argc, char *argv[],
+			       const struct fuse_operations *op,
+			       size_t op_size,
+			       char **mountpoint,
+			       int *multithreaded,
+			       int *fd,
+			       void *user_data,
+			       struct fuse_chan **ch)
+{
+	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+	struct fuse *fuse;
+	int foreground;
+	int res;
+
+	res = fuse_parse_cmdline(&args, mountpoint, multithreaded, &foreground);
+	if (res == -1)
+		return NULL;
+
+	*ch = fuse_mount(*mountpoint, &args);
+	if (!*ch) {
+		fuse_opt_free_args(&args);
+		goto err_free;
+	}
+
+	fuse = fuse_new(*ch, &args, op, op_size, user_data);
+	fuse_opt_free_args(&args);
+	if (fuse == NULL)
+		goto err_unmount;
+
+	res = fuse_daemonize(foreground);
+	if (res == -1)
+		goto err_unmount;
+
+	res = fuse_set_signal_handlers(fuse_get_session(fuse));
+	if (res == -1)
+		goto err_unmount;
+
+	return fuse;
+
+err_unmount:
+	fuse_unmount(*mountpoint, *ch);
+	if (fuse)
+		fuse_destroy(fuse);
+err_free:
+	free(*mountpoint);
+	return NULL;
+}
+#endif
+
 static PyObject *
 Fuse_main(PyObject *self, PyObject *args, PyObject *kw)
 {
@@ -1072,7 +1130,10 @@ Fuse_main(PyObject *self, PyObject *args, PyObject *kw)
    	 * the lib won't end up in dereferring a NULL pointer.
    	 * (Later versions check for NULL, nevertheless we play safe.)
    	 */
-#if FUSE_VERSION >= 26
+#if defined(FSP_FUSE_API)
+	struct fuse_chan *ch=NULL;
+	fuse=fuse_setup_(fargc, fargv, &op, sizeof(op), &fmp, &mthp, NULL, NULL, &ch);
+#elif FUSE_VERSION >= 26 
 	fuse = fuse_setup(fargc, fargv, &op, sizeof(op), &fmp, &mthp, NULL);
 #elif FUSE_VERSION >= 22
 	fuse = fuse_setup(fargc, fargv, &op, sizeof(op), &fmp, &mthp, &fd);
@@ -1107,7 +1168,9 @@ Fuse_main(PyObject *self, PyObject *args, PyObject *kw)
 		err = fuse_loop(fuse);
 	}
 
-#if FUSE_VERSION >= 26
+#if defined(FSP_FUSE_API)
+	fuse_teardown_(fuse, fmp,ch);	
+#elif FUSE_VERSION >= 26
 	fuse_teardown(fuse, fmp);	
 #elif FUSE_VERSION >= 22
 	fuse_teardown(fuse, fd, fmp);
@@ -1120,7 +1183,6 @@ Fuse_main(PyObject *self, PyObject *args, PyObject *kw)
 
 		return (NULL);
 	}		 
-
 	Py_INCREF(Py_None);
 	return Py_None;
 }
